@@ -1,0 +1,23 @@
+# Recorded training data (CSV files can be large, keep them local)
+data/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Virtual environment (if you create one later)
+venv/
+.venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
