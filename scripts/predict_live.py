@@ -1,14 +1,14 @@
 """
 STEP 6 - Live Prediction Script
 ---------------------------------
-Opens your webcam, detects your body with MediaPipe, and uses the trained
-model to predict your breathing phase in real time.
+Opens your webcam, tracks your breathing using optical flow boxes,
+and predicts your breathing phase in real time.
 
 How it works:
-  - Keeps a rolling buffer of the last 60 frames
-  - Every frame: extracts landmarks, adds to buffer
-  - Once buffer is full: smooths + normalizes the window, runs the model
-  - Displays the predicted breathing phase live on screen
+  - YOLO finds your shoulder + hip to position 3 boxes (shoulder, chest, belly)
+  - Each frame: optical flow measures x-direction movement inside each box
+  - 60-frame rolling buffer of those 3 signals feeds the trained model
+  - Predicted phase shown top-right with confidence bars on the left
 
 Run with:
   py -3.12 scripts/predict_live.py
@@ -19,22 +19,19 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-import mediapipe as mp
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
+from ultralytics import YOLO
 from collections import deque
 from scipy.signal import savgol_filter
 
-# ── Config — must match process_data.py and train_model.py ───────────────────
-WINDOW_SIZE   = 60     # frames in the rolling buffer
-SMOOTH_WINDOW = 15     # savgol smoothing window
-SMOOTH_ORDER  = 3      # savgol polynomial order
-NUM_FEATURES  = 26     # 13 landmarks x 2 (x, y)
+# ── Config — must match process_data.py ──────────────────────────────────────
+WINDOW_SIZE   = 60
+SMOOTH_WINDOW = 11
+SMOOTH_ORDER  = 3
+NUM_FEATURES  = 3
 NUM_CLASSES   = 4
 
 LABEL_NAMES = ['inhale', 'exhale', 'hold_in', 'hold_out']
 
-# Label display colors (BGR)
 LABEL_COLORS = {
     'inhale':   (0,   255, 100),
     'exhale':   (0,   100, 255),
@@ -42,21 +39,24 @@ LABEL_COLORS = {
     'hold_out': (200, 0,   255),
 }
 
-# Landmarks to extract — must be same order as in collect_data.py
-LANDMARK_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+BOX_COLORS = {
+    'shoulder': (255, 100, 0  ),
+    'chest':    (0,   200, 255),
+    'belly':    (0,   255, 100),
+}
 
-# Skeleton lines to draw
-POSE_CONNECTIONS = [
-    (11, 12),
-    (0, 7), (0, 8),
-]
+# Box positioning — must match collect_data.py
+STEP     = 80
+BOX_HALF = 80
+
+# COCO keypoint indices
+IDX_LS, IDX_RS, IDX_LH, IDX_RH = 5, 6, 11, 12
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 scripts_dir = os.path.dirname(__file__)
 model_path  = os.path.normpath(os.path.join(scripts_dir, '..', 'models', 'breathing_model.pt'))
-mp_model    = os.path.normpath(os.path.join(scripts_dir, '..', 'models', 'pose_landmarker_lite.task'))
 
-# ── Model Definition — must match train_model.py exactly ─────────────────────
+# ── Model definition — must match train_model.py exactly ─────────────────────
 class BreathingModel(nn.Module):
     def __init__(self, num_features, num_classes):
         super().__init__()
@@ -78,63 +78,57 @@ class BreathingModel(nn.Module):
         x = self.dropout(x)
         return self.classifier(x)
 
-# ── Load trained model ────────────────────────────────────────────────────────
+# ── Load model ────────────────────────────────────────────────────────────────
 print("Loading model...")
 model = BreathingModel(num_features=NUM_FEATURES, num_classes=NUM_CLASSES)
 model.load_state_dict(torch.load(model_path, map_location='cpu'))
 model.eval()
 print("Model loaded.\n")
 
-# ── Setup MediaPipe ───────────────────────────────────────────────────────────
-base_options = mp_python.BaseOptions(model_asset_path=mp_model)
-options = mp_vision.PoseLandmarkerOptions(
-    base_options=base_options,
-    running_mode=mp_vision.RunningMode.IMAGE,
-    num_poses=1,
-    min_pose_detection_confidence=0.7,
-    min_pose_presence_confidence=0.7,
-    min_tracking_confidence=0.7,
-)
-landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+# ── Load YOLO ─────────────────────────────────────────────────────────────────
+yolo_model = YOLO('yolov8n-pose.pt')
 
 # ── Open webcam ───────────────────────────────────────────────────────────────
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 if not cap.isOpened():
     print("ERROR: Could not open webcam.")
     exit()
 
-# ── Rolling buffer — holds last 60 frames of landmark data ───────────────────
-buffer = deque(maxlen=WINDOW_SIZE)
+# ── Rolling buffer ────────────────────────────────────────────────────────────
+buffer    = deque(maxlen=WINDOW_SIZE)
+prev_gray = None
 
-current_label      = None   # latest prediction
-current_confidence = 0.0    # confidence of latest prediction
+current_label      = None
+current_confidence = 0.0
 
-print("Running — press Q to quit.\n")
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def box_flow(flow_x, y1, y2, x1, x2):
+    region = flow_x[y1:y2, x1:x2]
+    if region.size == 0:
+        return 0.0
+    return float(region.mean())
+
+def hbox(cx, w):
+    return (max(0, cx - BOX_HALF), min(w - 1, cx + BOX_HALF))
 
 def predict(buffer):
-    """Smooth, normalize and run the model on the current buffer."""
-    window = np.array(buffer, dtype=np.float32)   # (60, 26)
-
-    # Smooth each feature column
+    window = np.array(buffer, dtype=np.float32)   # (60, 3)
     for i in range(window.shape[1]):
         window[:, i] = savgol_filter(window[:, i], SMOOTH_WINDOW, SMOOTH_ORDER)
-
-    # Normalize each feature to 0-1 within this window
     col_min   = window.min(axis=0)
     col_max   = window.max(axis=0)
     col_range = col_max - col_min
-    col_range[col_range == 0] = 1           # avoid division by zero
+    col_range[col_range == 0] = 1
     window = (window - col_min) / col_range
-
-    # Run model
-    x = torch.tensor(window, dtype=torch.float32).unsqueeze(0)  # (1, 60, 26)
+    x = torch.tensor(window, dtype=torch.float32).unsqueeze(0)
     with torch.no_grad():
-        logits = model(x)                            # (1, 4)
-        probs  = torch.softmax(logits, dim=1)[0]     # (4,)
+        logits = model(x)
+        probs  = torch.softmax(logits, dim=1)[0]
         pred   = probs.argmax().item()
         conf   = probs[pred].item()
-
     return LABEL_NAMES[pred], conf, probs.numpy()
+
+print("Running — press Q to quit.\n")
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 while True:
@@ -143,81 +137,99 @@ while True:
         break
 
     h, w = frame.shape[:2]
-    key  = cv2.waitKey(1) & 0xFF
+    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break
 
-    # Run MediaPipe
-    mp_image = mp.Image(
-        image_format=mp.ImageFormat.SRGB,
-        data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    )
-    result = landmarker.detect(mp_image)
+    results  = yolo_model(frame, verbose=False)
+    detected = False
 
-    if result.pose_landmarks:
-        landmarks = result.pose_landmarks[0]
+    if (results[0].keypoints is not None
+            and len(results[0].keypoints) > 0
+            and results[0].keypoints.xy.shape[0] > 0):
 
-        # Extract features in the same order as collect_data.py
-        frame_features = []
-        for idx in LANDMARK_INDICES:
-            frame_features.append(landmarks[idx].x)
-            frame_features.append(landmarks[idx].y)
+        kp = results[0].keypoints.xy[0]
 
-        buffer.append(frame_features)
+        sh = kp[IDX_LS] if float(kp[IDX_LS][0]) > 0 else kp[IDX_RS]
+        hp = kp[IDX_LH] if float(kp[IDX_LH][0]) > 0 else kp[IDX_RH]
 
-        # Draw skeleton
-        for (a, b) in POSE_CONNECTIONS:
-            x1, y1 = int(landmarks[a].x * w), int(landmarks[a].y * h)
-            x2, y2 = int(landmarks[b].x * w), int(landmarks[b].y * h)
-            cv2.line(frame, (x1, y1), (x2, y2), (0, 200, 0), 2)
-        for idx in LANDMARK_INDICES:
-            cx = int(landmarks[idx].x * w)
-            cy = int(landmarks[idx].y * h)
-            cv2.circle(frame, (cx, cy), 4, (0, 255, 255), -1)
+        sh_px, sh_py = int(float(sh[0])), int(float(sh[1]))
+        hp_px, hp_py = int(float(hp[0])), int(float(hp[1]))
 
-        # Predict once buffer is full
-        if len(buffer) == WINDOW_SIZE:
-            current_label, current_confidence, all_probs = predict(buffer)
+        if sh_px > 0 and hp_px > 0 and hp_py > sh_py:
+            detected = True
 
-            # Draw confidence bars for all 4 classes on the left side
-            bar_x     = 10
-            bar_width = 150
-            for i, name in enumerate(LABEL_NAMES):
-                bar_y   = 120 + i * 40
-                bar_len = int(all_probs[i] * bar_width)
-                color   = LABEL_COLORS[name]
-                cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + 20), (50, 50, 50), -1)
-                cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_len,   bar_y + 20), color, -1)
-                cv2.putText(frame, f'{name} {all_probs[i]:.0%}', (bar_x + bar_width + 10, bar_y + 15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            torso_h = hp_py - sh_py
+            third   = torso_h // 3
 
-        # Show buffer fill progress until model starts predicting
-        else:
-            fill_pct = len(buffer) / WINDOW_SIZE
-            cv2.putText(frame, f'Warming up... {len(buffer)}/{WINDOW_SIZE}', (10, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
-            cv2.rectangle(frame, (10, 70), (10 + int(fill_pct * 200), 85), (100, 200, 100), -1)
+            boxes = {
+                'shoulder': (max(0, sh_py - third//2), sh_py + third//2,         *hbox(sh_px,               w)),
+                'chest':    (sh_py + third//2,          sh_py + third + third//2, *hbox(sh_px - STEP,        w)),
+                'belly':    (sh_py + third + third//2,  min(h-1, hp_py),          *hbox(sh_px - int(STEP*1.5), w)),
+            }
 
-    else:
-        buffer.clear()   # reset buffer if body is lost
-        cv2.putText(frame, 'No body detected — step back', (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            if prev_gray is not None:
+                flow = cv2.calcOpticalFlowFarneback(
+                    prev_gray, curr_gray, None,
+                    pyr_scale=0.5, levels=3, winsize=15,
+                    iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+                )
+                flow_x = flow[:, :, 0]
+                buffer.append([
+                    box_flow(flow_x, *boxes['shoulder']),
+                    box_flow(flow_x, *boxes['chest']),
+                    box_flow(flow_x, *boxes['belly']),
+                ])
 
-    # Show current prediction top-right
+            # Draw boxes
+            for name, (by1, by2, bx1, bx2) in boxes.items():
+                cv2.rectangle(frame, (bx1, by1), (bx2, by2), BOX_COLORS[name], 2)
+
+            cv2.circle(frame, (sh_px, sh_py), 6, (0, 255, 255), -1)
+            cv2.circle(frame, (hp_px, hp_py), 6, (0, 255, 255), -1)
+
+            if len(buffer) == WINDOW_SIZE:
+                current_label, current_confidence, all_probs = predict(buffer)
+
+                bar_x     = 10
+                bar_width = 150
+                for i, name in enumerate(LABEL_NAMES):
+                    bar_y   = 120 + i * 40
+                    bar_len = int(all_probs[i] * bar_width)
+                    color   = LABEL_COLORS[name]
+                    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + 20), (50, 50, 50), -1)
+                    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_len,   bar_y + 20), color, -1)
+                    cv2.putText(frame, f'{name} {all_probs[i]:.0%}',
+                                (bar_x + bar_width + 10, bar_y + 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            else:
+                fill_pct = len(buffer) / WINDOW_SIZE
+                cv2.putText(frame, f'Warming up... {len(buffer)}/{WINDOW_SIZE}',
+                            (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+                cv2.rectangle(frame, (10, 70), (10 + int(fill_pct * 200), 85), (100, 200, 100), -1)
+
+    if not detected:
+        prev_gray = None
+        buffer.clear()
+        cv2.putText(frame, 'No body detected - sit sideways, step back',
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
     if current_label:
-        color     = LABEL_COLORS[current_label]
-        label_txt = f'{current_label}  {current_confidence:.0%}'
-        txt_size  = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
-        cv2.putText(frame, label_txt, (w - txt_size[0] - 20, 50),
+        color    = LABEL_COLORS[current_label]
+        txt      = f'{current_label}  {current_confidence:.0%}'
+        txt_size = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+        cv2.putText(frame, txt, (w - txt_size[0] - 20, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
 
     cv2.putText(frame, 'Q = quit', (10, h - 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
 
-    cv2.imshow('Breathing AI — Live', frame)
+    cv2.imshow('Breathing AI - Live', frame)
+    prev_gray = curr_gray
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 cap.release()
 cv2.destroyAllWindows()
-landmarker.close()
 print("Done.")
