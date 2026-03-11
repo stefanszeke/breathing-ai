@@ -13,7 +13,7 @@ Controls:
 
 How to use:
   1. Run this script
-  2. Press the matching key as you breathe — hold it down for the whole phase
+  2. Press the matching key when a phase starts — label stays until you press the next key
   3. Press Q to stop - the CSV file is saved automatically
 
 Output: data/session_001.csv (or next available number)
@@ -62,13 +62,13 @@ LEFT_SHOULDER  = 11
 RIGHT_SHOULDER = 12
 
 POSE_CONNECTIONS = [
-    (11, 12),
-    (11, 13), (13, 15),
-    (12, 14), (14, 16),
-    (11, 23), (12, 24),
-    (23, 24),
-    (23, 25), (25, 27),
-    (24, 26), (26, 28),
+    (11, 12),           # shoulders
+    (11, 13), (13, 15), # left arm
+    (12, 14), (14, 16), # right arm
+    (11, 23), (12, 24), # torso sides
+    (23, 24),           # hips
+    (23, 25), (25, 27), # left leg
+    (24, 26), (26, 28), # right leg
 ]
 
 # ── Label key mapping ─────────────────────────────────────────────────────────
@@ -88,7 +88,9 @@ LABEL_COLORS = {
     None:       (100, 100, 100),   # grey — no key pressed
 }
 
+
 def draw_skeleton(frame, landmarks, h, w):
+    """Draw pose skeleton lines and dots on the frame."""
     for (a, b) in POSE_CONNECTIONS:
         if a < len(landmarks) and b < len(landmarks):
             x1, y1 = int(landmarks[a].x * w), int(landmarks[a].y * h)
@@ -105,7 +107,7 @@ if not cap.isOpened():
     exit()
 
 print(f"Recording to: {output_file}")
-print("Hold a key to label each breathing phase:")
+print("Press a key when each phase starts — label stays until you press the next key:")
 print("  W = inhale  |  S = exhale  |  E = hold_in  |  D = hold_out")
 print("  Q = stop and save\n")
 
