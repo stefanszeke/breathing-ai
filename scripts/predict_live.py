@@ -16,6 +16,7 @@ Run with:
 
 import os
 import time
+import csv
 import cv2
 import numpy as np
 import torch
@@ -56,6 +57,8 @@ IDX_LS, IDX_RS, IDX_LH, IDX_RH = 5, 6, 11, 12
 # ── Paths ─────────────────────────────────────────────────────────────────────
 scripts_dir = os.path.dirname(__file__)
 model_path  = os.path.normpath(os.path.join(scripts_dir, '..', 'models', 'breathing_model.pt'))
+logs_dir    = os.path.normpath(os.path.join(scripts_dir, '..', 'logs'))
+os.makedirs(logs_dir, exist_ok=True)
 
 # ── Model definition — must match train_model.py exactly ─────────────────────
 class BreathingModel(nn.Module):
@@ -108,6 +111,8 @@ SMOOTH_PROBS_LEN = 15   # number of frames to average probabilities over
 
 prob_history          = deque(maxlen=SMOOTH_PROBS_LEN)
 current_label         = None
+session_log           = []   # rows: [timestamp, label, inhale%, exhale%, hold_in%, hold_out%]
+session_start         = time.time()
 locked_hold_type      = None   # set at hold onset from last active label
 last_active_label     = None   # last non-hold label (inhale/exhale)
 active_frames_since_hold = 0   # how many consecutive non-hold frames since lock set
@@ -280,6 +285,15 @@ while True:
                     display_probs[locked_idx] += display_probs[other_idx]
                     display_probs[other_idx]   = 0.0
 
+                session_log.append([
+                    round(time.time() - session_start, 2),
+                    current_label,
+                    round(float(display_probs[0]), 4),
+                    round(float(display_probs[1]), 4),
+                    round(float(display_probs[2]), 4),
+                    round(float(display_probs[3]), 4),
+                ])
+
                 bar_x     = 10
                 bar_width = 150
                 for i, name in enumerate(LABEL_NAMES):
@@ -325,4 +339,14 @@ while True:
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 cap.release()
 cv2.destroyAllWindows()
+
+if session_log:
+    ts  = time.strftime('%Y%m%d_%H%M%S')
+    csv_path = os.path.join(logs_dir, f'session_{ts}.csv')
+    with open(csv_path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['time_s', 'label', 'inhale', 'exhale', 'hold_in', 'hold_out'])
+        w.writerows(session_log)
+    print(f"Session saved → {csv_path}  ({len(session_log)} frames)")
+
 print("Done.")

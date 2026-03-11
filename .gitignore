@@ -1,5 +1,7 @@
 # Recorded training data (CSV files can be large, keep them local)
 data/
+# logs
+logs/
 
 # Python cache files
 __pycache__/
