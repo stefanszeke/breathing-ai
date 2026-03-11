@@ -86,27 +86,42 @@ for csv_path in csv_files:
             polyorder=SMOOTH_ORDER
         )
 
-    # ── Normalize each feature to 0-1 within this session ────────────────────
-    col_min   = smoothed.min()
-    col_max   = smoothed.max()
-    col_range = col_max - col_min
-    col_range[col_range == 0] = 1
-    normalized = (smoothed - col_min) / col_range
-
-    features = normalized.values    # (num_frames, 3)
-    labels   = df['label'].values   # (num_frames,)
+    raw_features = smoothed.values   # (num_frames, 3) — keep raw for std feature
+    labels       = df['label'].values
 
     # ── Slide window ──────────────────────────────────────────────────────────
     session_windows = 0
     for start in range(0, len(df) - WINDOW_SIZE + 1, STEP_SIZE):
         end = start + WINDOW_SIZE
 
-        window_features = features[start:end]
-        window_labels   = labels[start:end]
+        raw_window    = raw_features[start:end]   # (60, 3)
+        window_labels = labels[start:end]
 
         majority_label = Counter(window_labels).most_common(1)[0][0]
         if majority_label not in LABEL_MAP:
             continue
+
+        # Std of each feature in this window BEFORE normalization — tells the
+        # model how much movement actually happened (near 0 = hold, large = active)
+        window_std  = raw_window.std(axis=0)                       # (3,)
+        std_feature = np.tile(window_std, (WINDOW_SIZE, 1))        # (60, 3)
+
+        # Mean absolute value per box — separates holds from active breathing
+        mean_abs         = np.abs(raw_window).mean(axis=0)         # (3,)
+        mean_abs_feature = np.tile(mean_abs, (WINDOW_SIZE, 1))     # (60, 3)
+
+        # Signed mean per box — net direction of flow (+ = expanding, - = contracting)
+        # This is the key feature for inhale vs exhale: normalization erases sign, this restores it
+        mean_signed         = raw_window.mean(axis=0)              # (3,)
+        mean_signed_feature = np.tile(mean_signed, (WINDOW_SIZE, 1))  # (60, 3)
+
+        # Normalize to [-1, 1] by dividing by abs-max — preserves sign (inhale +, exhale -)
+        abs_max = np.abs(raw_window).max(axis=0)
+        abs_max[abs_max == 0] = 1
+        norm_window = raw_window / abs_max                         # (60, 3), range [-1, 1]
+
+        # Concatenate: 3 normalised + 3 std + 3 mean_abs + 3 mean_signed = 12 features
+        window_features = np.concatenate([norm_window, std_feature, mean_abs_feature, mean_signed_feature], axis=1)  # (60, 12)
 
         all_X.append(window_features)
         all_y.append(LABEL_MAP[majority_label])
@@ -120,7 +135,7 @@ y = np.array(all_y, dtype=np.int64)
 
 print()
 print(f"Dataset shape:  X={X.shape}  y={y.shape}")
-print(f"Features:       {X.shape[2]}  (shoulder_flow, chest_flow, belly_flow)")
+print(f"Features:       {X.shape[2]}  (3 normalised flow + 3 std + 3 mean_abs + 3 mean_signed)")
 print()
 
 label_names = {v: k for k, v in LABEL_MAP.items()}

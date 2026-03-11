@@ -116,6 +116,10 @@ if VIEW == 'side':
     current_label = None
     prev_gray     = None   # previous frame for optical flow
 
+    # Box position locking — set once on first detection, X to reposition
+    anchor_sh_px = anchor_sh_py = anchor_hp_px = anchor_hp_py = None
+    reposition_requested = False
+
     def box_flow(flow_x, y1, y2, x1, x2):
         """Mean x-direction optical flow in a pixel box. + = expanding, - = contracting."""
         region = flow_x[y1:y2, x1:x2]
@@ -135,6 +139,8 @@ if VIEW == 'side':
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
+        elif key == ord('x'):
+            reposition_requested = True
         elif key in KEY_LABELS:
             current_label = KEY_LABELS[key]
 
@@ -155,8 +161,17 @@ if VIEW == 'side':
             sh = ls if float(ls[0]) > 0 else rs
             hp = lh if float(lh[0]) > 0 else rh
 
-            sh_px, sh_py = int(float(sh[0])), int(float(sh[1]))
-            hp_px, hp_py = int(float(hp[0])), int(float(hp[1]))
+            raw_sh_px, raw_sh_py = float(sh[0]), float(sh[1])
+            raw_hp_px, raw_hp_py = float(hp[0]), float(hp[1])
+
+            if raw_sh_px > 0 and raw_hp_px > 0 and raw_hp_py > raw_sh_py:
+                if anchor_sh_px is None or reposition_requested:
+                    anchor_sh_px, anchor_sh_py = raw_sh_px, raw_sh_py
+                    anchor_hp_px, anchor_hp_py = raw_hp_px, raw_hp_py
+                    reposition_requested = False
+
+            sh_px, sh_py = int(anchor_sh_px or raw_sh_px), int(anchor_sh_py or raw_sh_py)
+            hp_px, hp_py = int(anchor_hp_px or raw_hp_px), int(anchor_hp_py or raw_hp_py)
 
             if sh_px > 0 and hp_px > 0 and hp_py > sh_py:
                 detected = True
@@ -235,7 +250,7 @@ if VIEW == 'side':
         text_size   = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
         cv2.putText(frame, label_text, (w - text_size[0] - 20, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, label_color, 3)
-        cv2.putText(frame, 'W=inhale  S=exhale  E=hold_in  D=hold_out  Q=quit',
+        cv2.putText(frame, 'W=inhale  S=exhale  E=hold_in  D=hold_out  X=repos  Q=quit',
                     (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
         cv2.imshow('Breathing Data Collection — SIDE (boxes)', frame)

@@ -23,7 +23,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 
 # ── Config ────────────────────────────────────────────────────────────────────
-EPOCHS     = 100
+EPOCHS     = 150
 BATCH_SIZE = 64
 LR         = 0.001
 VAL_SPLIT  = 0.2
