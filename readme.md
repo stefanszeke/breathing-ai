@@ -27,8 +27,8 @@ Webcam -> MediaPipe detects body -> face + shoulder landmarks recorded
 | 3 | Data processing & smoothing | Done |
 | 4 | Labeling | Done (real-time, during recording) |
 | 5 | Train model | Done — 87.8% accuracy |
-| 6 | Live integration | Next |
-| 7 | Test & improve | Pending |
+| 6 | Live integration | Done |
+| 7 | Test & improve | In progress |
 
 ---
 
@@ -52,6 +52,7 @@ breathing-ai/
 |   +-- collect_data.py            # Step 2 -- webcam recording with real-time labeling
 |   +-- process_data.py            # Step 3 -- smooth, normalize, slice into windows
 |   +-- train_model.py             # Step 5 -- train the Conv1D + LSTM model
+|   +-- predict_live.py            # Step 6 -- live webcam breathing prediction
 |
 +-- readme.md
 ```
@@ -187,3 +188,18 @@ py -3.12 scripts/train_model.py
 
 Trains the Conv1D + LSTM model and saves the best weights to `models/breathing_model.pt`.
 Key settings in the script: `EPOCHS`, `BATCH_SIZE`, `LR` (learning rate).
+
+---
+
+## Live Prediction
+
+```bash
+py -3.12 scripts/predict_live.py
+```
+
+- Opens your webcam and runs the trained model in real time
+- Top-right: current predicted label + confidence (e.g. `exhale 91%`)
+- Left side: confidence bars for all 4 classes
+- Waits ~2 seconds on startup to fill the 60-frame buffer before predicting
+- If you move out of frame, the buffer resets automatically
+- Press **Q** to quit
