@@ -103,17 +103,16 @@ prev_gray = None
 anchor_sh_px = anchor_sh_py = anchor_hp_px = anchor_hp_py = None
 reposition_requested = False
 
-# Smoothing: keep last N raw predictions, display the majority vote
-PRED_HISTORY     = 15     # number of recent predictions to vote over
-CONF_THRESHOLD   = 0.50   # ignore predictions below this confidence
-SWITCH_THRESHOLD = 0.70   # new label must win this fraction of history to replace current
+# Smoothing: rolling average of probabilities, label = highest averaged bar
+SMOOTH_PROBS_LEN = 15   # number of frames to average probabilities over
 
-pred_history       = deque(maxlen=PRED_HISTORY)
-current_label      = None
-current_confidence = 0.0
+prob_history          = deque(maxlen=SMOOTH_PROBS_LEN)
+current_label         = None
+locked_hold_type      = None   # set at hold onset from last active label
+last_active_label     = None   # last non-hold label (inhale/exhale)
+active_frames_since_hold = 0   # how many consecutive non-hold frames since lock set
+HOLD_RELEASE_COUNT    = 8      # require this many consecutive active frames to release lock
 
-# State machine — track last active phase to pick the right hold type
-last_active = None   # 'inhale' or 'exhale'
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def box_flow(flow_x, y1, y2, x1, x2):
@@ -241,49 +240,55 @@ while True:
             cv2.circle(frame, (hp_px, hp_py), 6, (0, 255, 255), -1)
 
             if len(buffer) == WINDOW_SIZE:
-                raw_label, raw_conf, all_probs, mean_abs_cf = predict(buffer)
+                _, _, all_probs, _ = predict(buffer)
 
-                # Hard override returned None — placeholder, resolved after vote
-                if raw_label is None:
-                    raw_label = 'hold_in'   # temporary, state machine fixes it below
+                # Smooth probabilities by averaging over recent frames
+                prob_history.append(all_probs.copy())
+                avg_probs = np.mean(prob_history, axis=0)
+                top_idx   = int(np.argmax(avg_probs))
+                top_label = LABEL_NAMES[top_idx]
 
-                # Only count this prediction if confident enough
-                if raw_conf >= CONF_THRESHOLD:
-                    pred_history.append(raw_label)
+                # Hold type: lock at onset using last active label, release after sustained active
+                if top_label in ('hold_in', 'hold_out'):
+                    active_frames_since_hold = 0
+                    if locked_hold_type is None:
+                        # Use last known breathing direction to pick hold type
+                        if last_active_label == 'inhale':
+                            locked_hold_type = 'hold_in'
+                        elif last_active_label == 'exhale':
+                            locked_hold_type = 'hold_out'
+                        else:
+                            locked_hold_type = top_label  # fallback: trust model
+                    top_label = locked_hold_type
+                else:
+                    last_active_label = top_label  # track last inhale/exhale
+                    if locked_hold_type is not None:
+                        active_frames_since_hold += 1
+                        if active_frames_since_hold >= HOLD_RELEASE_COUNT:
+                            locked_hold_type = None
+                            active_frames_since_hold = 0
 
-                # Displayed label = majority vote with hysteresis
-                if pred_history:
-                    from collections import Counter
-                    counts      = Counter(pred_history)
-                    voted_label = counts.most_common(1)[0][0]
-                    vote_frac   = counts[voted_label] / len(pred_history)
+                current_label = top_label
 
-                    # Only switch if the winner has a strong enough lead,
-                    # or if there's no current label yet
-                    if current_label is None or vote_frac >= SWITCH_THRESHOLD:
-                        # Track last active phase from the voted result (more stable)
-                        if voted_label in ('inhale', 'exhale'):
-                            last_active = voted_label
-
-                        # State machine: apply hold correction to final voted label only
-                        if voted_label == 'hold_in' and last_active == 'exhale':
-                            voted_label = 'hold_out'
-                        elif voted_label == 'hold_out' and last_active == 'inhale':
-                            voted_label = 'hold_in'
-
-                        current_label = voted_label
-
-                    current_confidence = raw_conf
+                # Sync bars with lock: merge both hold probs into the locked hold type
+                display_probs = avg_probs.copy()
+                if locked_hold_type is not None:
+                    hi_idx = LABEL_NAMES.index('hold_in')
+                    ho_idx = LABEL_NAMES.index('hold_out')
+                    locked_idx = LABEL_NAMES.index(locked_hold_type)
+                    other_idx  = ho_idx if locked_hold_type == 'hold_in' else hi_idx
+                    display_probs[locked_idx] += display_probs[other_idx]
+                    display_probs[other_idx]   = 0.0
 
                 bar_x     = 10
                 bar_width = 150
                 for i, name in enumerate(LABEL_NAMES):
                     bar_y   = 120 + i * 40
-                    bar_len = int(all_probs[i] * bar_width)
+                    bar_len = int(display_probs[i] * bar_width)
                     color   = LABEL_COLORS[name]
                     cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + 20), (50, 50, 50), -1)
                     cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_len,   bar_y + 20), color, -1)
-                    cv2.putText(frame, f'{name} {all_probs[i]:.0%}',
+                    cv2.putText(frame, f'{name} {display_probs[i]:.0%}',
                                 (bar_x + bar_width + 10, bar_y + 15),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             else:
@@ -295,13 +300,18 @@ while True:
     if not detected:
         prev_gray = None
         buffer.clear()
-        pred_history.clear()
+        prob_history.clear()
+        current_label = None
+        last_active_label = None
+        locked_hold_type = None
+        active_frames_since_hold = 0
         cv2.putText(frame, 'No body detected - sit sideways, step back',
                     (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-    if current_label:
+    if current_label and len(prob_history) > 0:
+        avg_p    = float(np.mean(prob_history, axis=0)[LABEL_NAMES.index(current_label)])
         color    = LABEL_COLORS[current_label]
-        txt      = f'{current_label}  {current_confidence:.0%}'
+        txt      = f'{current_label}  {avg_p:.0%}'
         txt_size = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
         cv2.putText(frame, txt, (w - txt_size[0] - 20, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
