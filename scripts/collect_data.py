@@ -2,7 +2,12 @@
 STEP 2 - Data Collection Script
 --------------------------------
 Opens your webcam, detects your body with MediaPipe,
-and saves chest Y-position + breathing label to a CSV file every frame.
+and saves face + upper body landmark positions + breathing label to a CSV file every frame.
+
+Landmarks recorded (x and y for each):
+  Face:       nose, left/right eye (inner, center, outer), left/right ear, mouth (left, right)
+  Upper body: left/right shoulder
+  (elbows and wrists excluded — arms move during mouse use)
 
 Controls:
   W = inhale
@@ -57,18 +62,33 @@ options = mp_vision.PoseLandmarkerOptions(
 )
 landmarker = mp_vision.PoseLandmarker.create_from_options(options)
 
-# ── Landmark indices ──────────────────────────────────────────────────────────
-LEFT_SHOULDER  = 11
-RIGHT_SHOULDER = 12
+# ── Landmarks to record ───────────────────────────────────────────────────────
+# Each entry: (index, column_name)
+# Face landmarks 0-10, upper body 11-16 (shoulders, elbows, wrists)
+# Skipping hips and legs — not visible when sitting at a desk
+LANDMARKS_TO_RECORD = [
+    (0,  'nose'),
+    (1,  'left_eye_inner'),
+    (2,  'left_eye'),
+    (3,  'left_eye_outer'),
+    (4,  'right_eye_inner'),
+    (5,  'right_eye'),
+    (6,  'right_eye_outer'),
+    (7,  'left_ear'),
+    (8,  'right_ear'),
+    (9,  'mouth_left'),
+    (10, 'mouth_right'),
+    (11, 'left_shoulder'),
+    (12, 'right_shoulder'),
+]
 
+# ── Skeleton lines to draw on screen ─────────────────────────────────────────
 POSE_CONNECTIONS = [
+    (11, 12),
+    (11, 13), (13, 15),
+    (12, 14), (14, 16),
+    (0, 7), (0, 8),     # nose to ears
     (11, 12),           # shoulders
-    (11, 13), (13, 15), # left arm
-    (12, 14), (14, 16), # right arm
-    (11, 23), (12, 24), # torso sides
-    (23, 24),           # hips
-    (23, 25), (25, 27), # left leg
-    (24, 26), (26, 28), # right leg
 ]
 
 # ── Label key mapping ─────────────────────────────────────────────────────────
@@ -81,24 +101,31 @@ KEY_LABELS = {
 
 # Label display colors (BGR)
 LABEL_COLORS = {
-    'inhale':   (0,   255, 100),   # green
-    'exhale':   (0,   100, 255),   # orange
-    'hold_in':  (255, 200, 0  ),   # cyan-ish
-    'hold_out': (200, 0,   255),   # purple
-    None:       (100, 100, 100),   # grey — no key pressed
+    'inhale':   (0,   255, 100),
+    'exhale':   (0,   100, 255),
+    'hold_in':  (255, 200, 0  ),
+    'hold_out': (200, 0,   255),
+    None:       (100, 100, 100),
 }
 
-
 def draw_skeleton(frame, landmarks, h, w):
-    """Draw pose skeleton lines and dots on the frame."""
     for (a, b) in POSE_CONNECTIONS:
         if a < len(landmarks) and b < len(landmarks):
             x1, y1 = int(landmarks[a].x * w), int(landmarks[a].y * h)
             x2, y2 = int(landmarks[b].x * w), int(landmarks[b].y * h)
             cv2.line(frame, (x1, y1), (x2, y2), (0, 200, 0), 2)
-    for lm in landmarks:
-        cx, cy = int(lm.x * w), int(lm.y * h)
-        cv2.circle(frame, (cx, cy), 4, (0, 255, 255), -1)
+    for idx, _ in LANDMARKS_TO_RECORD:
+        if idx < len(landmarks):
+            cx = int(landmarks[idx].x * w)
+            cy = int(landmarks[idx].y * h)
+            cv2.circle(frame, (cx, cy), 4, (0, 255, 255), -1)
+
+# ── Build CSV header ──────────────────────────────────────────────────────────
+# frame, then x+y for every landmark, then shoulder_width, timestamp, label
+header = ['frame']
+for _, name in LANDMARKS_TO_RECORD:
+    header += [f'{name}_x', f'{name}_y']
+header += ['shoulder_width', 'timestamp', 'label']
 
 # ── Open webcam ───────────────────────────────────────────────────────────────
 cap = cv2.VideoCapture(0)
@@ -114,11 +141,11 @@ print("  Q = stop and save\n")
 # ── Prepare CSV ───────────────────────────────────────────────────────────────
 csv_file = open(output_file, 'w', newline='')
 writer = csv.writer(csv_file)
-writer.writerow(['frame', 'chest_y', 'shoulder_width', 'timestamp', 'label'])
+writer.writerow(header)
 
-frame_num    = 0
-start_time   = time.time()
-current_label = None   # label currently held down by user
+frame_num     = 0
+start_time    = time.time()
+current_label = None
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 while True:
@@ -129,9 +156,7 @@ while True:
 
     h, w = frame.shape[:2]
 
-    # Check which key is being pressed this frame
     key = cv2.waitKey(1) & 0xFF
-
     if key == ord('q'):
         break
     elif key in KEY_LABELS:
@@ -146,16 +171,19 @@ while True:
     if result.pose_landmarks:
         landmarks = result.pose_landmarks[0]
 
-        left_shoulder  = landmarks[LEFT_SHOULDER]
-        right_shoulder = landmarks[RIGHT_SHOULDER]
-
-        chest_y       = (left_shoulder.y + right_shoulder.y) / 2
+        left_shoulder  = landmarks[11]
+        right_shoulder = landmarks[12]
+        chest_y        = (left_shoulder.y + right_shoulder.y) / 2
         shoulder_width = abs(left_shoulder.x - right_shoulder.x)
         timestamp      = round(time.time() - start_time, 3)
 
-        # Only save frames that have a label (key is being held)
         if current_label is not None:
-            writer.writerow([frame_num, round(chest_y, 5), round(shoulder_width, 5), timestamp, current_label])
+            row = [frame_num]
+            for idx, _ in LANDMARKS_TO_RECORD:
+                lm = landmarks[idx]
+                row += [round(lm.x, 5), round(lm.y, 5)]
+            row += [round(shoulder_width, 5), timestamp, current_label]
+            writer.writerow(row)
 
         draw_skeleton(frame, landmarks, h, w)
 
@@ -167,14 +195,12 @@ while True:
         cv2.putText(frame, 'No body detected - step back', (10, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-    # Show current label in top-right corner with its color
     label_text  = current_label if current_label else 'no label'
     label_color = LABEL_COLORS[current_label]
     text_size   = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
     cv2.putText(frame, label_text, (w - text_size[0] - 20, 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.2, label_color, 3)
 
-    # Controls reminder at the bottom
     cv2.putText(frame, 'W=inhale  S=exhale  E=hold_in  D=hold_out  Q=quit', (10, h - 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
