@@ -342,11 +342,37 @@ cv2.destroyAllWindows()
 
 if session_log:
     ts  = time.strftime('%Y%m%d_%H%M%S')
+
+    # Full frame-by-frame log
     csv_path = os.path.join(logs_dir, f'session_{ts}.csv')
     with open(csv_path, 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['time_s', 'label', 'inhale', 'exhale', 'hold_in', 'hold_out'])
         w.writerows(session_log)
-    print(f"Session saved → {csv_path}  ({len(session_log)} frames)")
+
+    # Phase summary: one row per phase with duration in seconds
+    phases = []
+    cur_label = session_log[0][1]
+    cur_start = session_log[0][0]
+    for row in session_log[1:]:
+        if row[1] != cur_label:
+            phases.append([cur_label, cur_start, row[0], round(row[0] - cur_start, 2)])
+            cur_label, cur_start = row[1], row[0]
+    phases.append([cur_label, cur_start, session_log[-1][0],
+                   round(session_log[-1][0] - cur_start, 2)])
+
+    summary_path = os.path.join(logs_dir, f'summary_{ts}.csv')
+    with open(summary_path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['label', 'start_s', 'end_s', 'duration_s'])
+        w.writerows(phases)
+
+    print(f"Session saved  → {csv_path}  ({len(session_log)} frames)")
+    print(f"Summary saved  → {summary_path}  ({len(phases)} phases)")
+    print()
+    print(f"{'label':<12} {'duration':>8}")
+    print("-" * 22)
+    for p in phases:
+        print(f"{p[0]:<12} {p[3]:>7.1f}s")
 
 print("Done.")
