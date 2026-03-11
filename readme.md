@@ -113,8 +113,7 @@ py -3.12 -c "import cv2, mediapipe, torch; print('All good! PyTorch version:', t
 ## Running the Data Collection
 
 ```bash
-cd scripts
-python collect_data.py
+py -3.12 scripts/collect_data.py
 ```
 
 - A window opens showing your webcam with a skeleton overlay
