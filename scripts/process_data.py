@@ -28,7 +28,7 @@ from scipy.signal import savgol_filter
 from collections import Counter
 
 # ── Config ────────────────────────────────────────────────────────────────────
-WINDOW_SIZE   = 30      # frames per training sample (~1 second at 30fps)
+WINDOW_SIZE   = 60      # frames per training sample (~1 second at 30fps)
 STEP_SIZE     = 5       # how many frames to slide the window each step
                         # smaller = more training samples (more overlap)
 
