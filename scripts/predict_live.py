@@ -98,6 +98,11 @@ if not cap.isOpened():
 buffer    = deque(maxlen=WINDOW_SIZE)
 prev_gray = None
 
+# Smoothing: keep last N raw predictions, display the majority vote
+PRED_HISTORY     = 10     # number of recent predictions to vote over
+CONF_THRESHOLD   = 0.60   # ignore predictions below this confidence
+
+pred_history       = deque(maxlen=PRED_HISTORY)
 current_label      = None
 current_confidence = 0.0
 
@@ -191,7 +196,17 @@ while True:
             cv2.circle(frame, (hp_px, hp_py), 6, (0, 255, 255), -1)
 
             if len(buffer) == WINDOW_SIZE:
-                current_label, current_confidence, all_probs = predict(buffer)
+                raw_label, raw_conf, all_probs = predict(buffer)
+
+                # Only count this prediction if confident enough
+                if raw_conf >= CONF_THRESHOLD:
+                    pred_history.append(raw_label)
+
+                # Displayed label = majority vote over recent history
+                if pred_history:
+                    from collections import Counter
+                    current_label      = Counter(pred_history).most_common(1)[0][0]
+                    current_confidence = raw_conf
 
                 bar_x     = 10
                 bar_width = 150
@@ -213,6 +228,7 @@ while True:
     if not detected:
         prev_gray = None
         buffer.clear()
+        pred_history.clear()
         cv2.putText(frame, 'No body detected - sit sideways, step back',
                     (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
