@@ -24,12 +24,12 @@ Webcam -> YOLOv8 finds shoulder + hip -> 3 boxes placed on shoulder / chest / be
 | Step | Description | Status |
 |------|-------------|--------|
 | 1 | Environment setup | Done |
-| 2 | Data collection — 10 side-view sessions | Done |
+| 2 | Data collection — 6 side-view sessions | Done |
 | 3 | Data processing & smoothing | Done |
 | 4 | Labeling | Done (real-time, during recording) |
-| 5 | Train model | In progress |
+| 5 | Train model | Done |
 | 6 | Live integration | Done |
-| 7 | Test & improve | In progress |
+| 7 | Test & improve | Done |
 
 ---
 
@@ -56,9 +56,11 @@ breathing-ai/
 |   +-- train_model.py                # Step 5 -- train the Conv1D + LSTM model
 |   +-- predict_live.py               # Step 6 -- live webcam breathing prediction
 |   +-- analyze_session.py            # Step 7 -- plot + summarize a session log CSV
+|   +-- test_yolo.py                  # Diagnostic -- verify YOLOv8 detects keypoints correctly
 |
 +-- logs/
-|   +-- session_YYYYMMDD_HHMMSS.csv  # Auto-saved after each live prediction session
+|   +-- session_YYYYMMDD_HHMMSS.csv  # Frame-by-frame predictions (auto-saved on quit)
+|   +-- summary_YYYYMMDD_HHMMSS.csv  # Phase transitions with durations (auto-saved on quit)
 |
 +-- readme.md
 ```
@@ -192,6 +194,7 @@ py -3.12 scripts/collect_data.py
 - Camera at waist/chest height, slightly to your side
 - Breathe deliberately so the chest and belly clearly expand
 - Aim for 10-15 full breathing cycles per session (~2-3 minutes)
+- Press the label key **when you see your body start moving** — not when you intend to breathe. The model sees movement, not intention. Pressing slightly late is better than pressing early.
 
 ---
 
@@ -231,7 +234,9 @@ py -3.12 scripts/predict_live.py
 - Waits ~3 seconds on startup to fill the 60-frame buffer before predicting
 - If you move out of frame, the buffer resets automatically
 - Box positions are locked on first detection — press **X** to reposition, **Q** to quit
-- Each session is automatically saved to `logs/session_YYYYMMDD_HHMMSS.csv` on quit
+- On quit, two files are saved automatically:
+  - `logs/session_YYYYMMDD_HHMMSS.csv` — frame-by-frame predictions with probabilities
+  - `logs/summary_YYYYMMDD_HHMMSS.csv` — each phase with start time, end time, and duration
 
 ---
 
